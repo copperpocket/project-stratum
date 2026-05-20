@@ -21,19 +21,49 @@ public class TacticalPlayer : MonoBehaviour
     public float attackDisplayDuration = 0.2f;
     public LineRenderer attackLine;
 
+    [Tooltip("Minimum time (in seconds) required between attacks.")]
+    public float attackCooldown = 0.5f; 
+    private float nextAttackTime = 0f;
+
+    [Header("Stamina Settings")]
+    public float maxStamina = 100f;
+    public float currentStamina = 100f;
+    [Tooltip("Stamina consumed per single attack ray burst.")]
+    public float attackStaminaCost = 25f; // Exactly 1/4 of a 100-point bar
+    [Tooltip("Stamina recovered per second while resting.")]
+    public float restRegenRate = 20f; 
+
     [Header("Environment")]
     public LayerMask groundLayer;
 
+    [Header("Visual Juice")]
+    [Tooltip("Assign the child GameObject containing your cylinder/mesh here.")]
+    public Transform visualContainer;
+    [Tooltip("How fast the player scales up/down when changing stances.")]
+    public float scaleSpeed = 5f;
+    [Tooltip("The local scale multiplier of the visuals when sitting.")]
+    public Vector3 sittingScale = new Vector3(1f, 0.4f, 1f); // Squashes Y to 40% height
+
+    private Coroutine stanceCoroutine;
+    private Vector3 originalVisualScale = Vector3.one;
+
     // FSM Core
     private PlayerState currentState;
+    [HideInInspector] public bool sitQueued = false;
 
     void Start()
     {
+        if (visualContainer != null)
+        {
+            originalVisualScale = visualContainer.localScale;
+        }
+
         if (attackLine != null)
         {
             attackLine.enabled = false;
         }
 
+        currentStamina = maxStamina; // Start completely topped off
         ChangeState(new IdleState(this));
     }
 
@@ -51,6 +81,51 @@ public class TacticalPlayer : MonoBehaviour
         currentState?.Exit();
         currentState = newState;
         currentState.Enter();
+    }
+
+    // --- NEW COMBINED RESOURCE/COOLDOWN CHECK ---
+    public bool CanAttack()
+    {
+        // Check if cooldown has finished
+        if (Time.time < nextAttackTime)
+        {
+            float remaining = nextAttackTime - Time.time;
+            Debug.LogWarning($"Attack on Cooldown! Wait {remaining:F2}s");
+            return false;
+        }
+
+        // Check if we have the stamina
+        return HasEnoughStamina(attackStaminaCost);
+    }
+
+    // Call this right when an attack succeeds to lock out further inputs
+    public void TriggerAttackCooldown()
+    {
+        nextAttackTime = Time.time + attackCooldown;
+    }
+
+    // --- STAMINA SYSTEM UTILITIES ---
+    public bool HasEnoughStamina(float cost)
+    {
+        return currentStamina >= cost;
+    }
+
+    public bool TryConsumeStamina(float cost)
+    {
+        if (HasEnoughStamina(cost))
+        {
+            currentStamina -= cost;
+            Debug.Log($"Stamina Consumed: -{cost}. Remaining: {currentStamina}/{maxStamina}");
+            return true;
+        }
+        
+        Debug.LogWarning($"Action Denied: Insufficient Stamina! Need {cost}, only have {currentStamina}");
+        return false;
+    }
+
+    public void RegenerateStamina(float amount)
+    {
+        currentStamina = Mathf.Min(currentStamina + amount, maxStamina);
     }
 
     // --- SHARED UTILITIES ---
@@ -91,6 +166,36 @@ public class TacticalPlayer : MonoBehaviour
 
         attackLine.enabled = false;
     }
+
+    // A utility helper to cleanly smoothly blend between scales
+    public void SetStanceScale(Vector3 targetScale)
+    {
+        if (visualContainer == null) return;
+        
+        if (stanceCoroutine != null)
+        {
+            StopCoroutine(stanceCoroutine);
+        }
+        stanceCoroutine = StartCoroutine(AnimateStance(targetScale));
+    }
+
+    private IEnumerator AnimateStance(Vector3 targetScale)
+    {
+        while (Vector3.Distance(visualContainer.localScale, targetScale) > 0.001f)
+        {
+            visualContainer.localScale = Vector3.Lerp(
+                visualContainer.localScale, 
+                targetScale, 
+                Time.deltaTime * scaleSpeed
+            );
+            yield return null;
+        }
+        visualContainer.localScale = targetScale;
+    }
+    
+    // Helper shortcuts for our states to call
+    public void SitDown() => SetStanceScale(Vector3.Scale(originalVisualScale, sittingScale));
+    public void StandUp() => SetStanceScale(originalVisualScale);
 }
 
 
@@ -116,8 +221,25 @@ public class IdleState : PlayerState
 {
     public IdleState(TacticalPlayer player) : base(player) { }
 
+    public override void Enter() 
+    { 
+        // If a sit was queued right as we became idle, consume it immediately
+        if (player.sitQueued)
+        {
+            player.sitQueued = false;
+            player.ChangeState(new RestingState(player));
+        }
+    }
+
     public override void HandleInput()
     {
+        // Transition to Resting State manually
+        if (Input.GetKeyDown(KeyCode.X))
+        {
+            player.ChangeState(new RestingState(player));
+            return;
+        }
+
         if (Input.GetMouseButton(0))
         {
             if (player.GetMouseGroundPoint(out Vector3 clickPoint))
@@ -136,8 +258,15 @@ public class IdleState : PlayerState
         {
             if (player.GetMouseGroundPoint(out Vector3 clickPoint))
             {
-                Vector3 direction = (clickPoint - player.transform.position).normalized;
-                player.FireAttackRay(direction);
+                // Verify BOTH cooldown and stamina before attacking
+                if (player.CanAttack())
+                {
+                    player.TriggerAttackCooldown(); // Start the clock
+                    player.TryConsumeStamina(player.attackStaminaCost);
+
+                    Vector3 direction = (clickPoint - player.transform.position).normalized;
+                    player.FireAttackRay(direction);
+                }
             }
         }
     }
@@ -160,6 +289,14 @@ public class RunState : PlayerState
         {
             player.transform.position = targetPoint;
 
+            // Check if they queued a sit while running
+            if (player.sitQueued)
+            {
+                player.sitQueued = false; // Clear the queue flag
+                player.ChangeState(new RestingState(player));
+                return;
+            }
+
             if (Input.GetMouseButton(0) && player.GetMouseGroundPoint(out Vector3 clickPoint))
             {
                 if (Input.GetKey(KeyCode.LeftShift))
@@ -180,10 +317,18 @@ public class RunState : PlayerState
 
     public override void HandleInput()
     {
+        // Queue the sit if they hit X while running
+        if (Input.GetKeyDown(KeyCode.X))
+        {
+            player.sitQueued = true;
+            Debug.Log("Sit Queued! Player will rest upon reaching target.");
+        }
+
         if (Input.GetMouseButtonDown(0))
         {
             if (player.GetMouseGroundPoint(out Vector3 clickPoint))
             {
+                player.sitQueued = false; // New movement cancels a queued sit
                 if (Input.GetKey(KeyCode.LeftShift))
                 {
                     player.ChangeState(new JumpState(player, clickPoint));
@@ -198,9 +343,24 @@ public class RunState : PlayerState
         {
             if (player.GetMouseGroundPoint(out Vector3 clickPoint))
             {
-                Vector3 direction = (clickPoint - player.transform.position).normalized;
-                player.FireAttackRay(direction);
-                player.ChangeState(new IdleState(player));
+                if (player.CanAttack())
+                {
+                    player.TriggerAttackCooldown();
+                    player.TryConsumeStamina(player.attackStaminaCost);
+
+                    Vector3 direction = (clickPoint - player.transform.position).normalized;
+                    player.FireAttackRay(direction);
+
+                    if (player.sitQueued)
+                    {
+                        player.sitQueued = false;
+                        player.ChangeState(new RestingState(player));
+                    }
+                    else
+                    {
+                        player.ChangeState(new IdleState(player));
+                    }
+                }
             }
         }
     }
@@ -213,7 +373,7 @@ public class JumpState : PlayerState
 
     private float totalJumpDuration;
     private float elapsedTime;
-    private float currentJumpHeight; // Scaled specifically for this instance's distance
+    private float currentJumpHeight;
 
     private bool attackQueued;
     private Vector3 queuedAttackDir;
@@ -244,14 +404,11 @@ public class JumpState : PlayerState
         float cleanDistance = Vector3.Distance(start, target);
         this.totalJumpDuration = cleanDistance / player.jumpSpeed;
 
-        // --- SCALE HEIGHT BASED ON DISTANCE ---
-        // 1. Find where the current distance falls between min and max parameters (Returns 0.0 to 1.0)
         float distanceRange = player.maxJumpDistance - player.minJumpDistance;
         float currentProgressFactor = distanceRange > 0f
-        ? Mathf.Clamp01((cleanDistance - player.minJumpDistance) / distanceRange)
-        : 0f;
+            ? Mathf.Clamp01((cleanDistance - player.minJumpDistance) / distanceRange)
+            : 0f;
 
-        // 2. Interpolate cleanly between min and max heights using that factor
         this.currentJumpHeight = Mathf.Lerp(player.minJumpHeight, player.maxJumpHeight, currentProgressFactor);
     }
 
@@ -273,7 +430,6 @@ public class JumpState : PlayerState
         else
         {
             Vector3 currentPos = Vector3.Lerp(start, target, progress);
-            // Uses the uniquely evaluated height value calculated on initialization
             currentPos.y += Mathf.Sin(progress * Mathf.PI) * currentJumpHeight;
             player.transform.position = currentPos;
         }
@@ -283,10 +439,26 @@ public class JumpState : PlayerState
     {
         player.transform.position = target;
 
+        // Priority 1: Execute queued mid-air attack
         if (attackQueued)
         {
-            player.FireAttackRay(queuedAttackDir);
+            // double check they haven't somehow bypassed cooldown constraints
+            if (player.CanAttack())
+            {
+                player.TriggerAttackCooldown();
+                player.TryConsumeStamina(player.attackStaminaCost);
+                player.FireAttackRay(queuedAttackDir);
+            }
+            player.sitQueued = false;
             player.ChangeState(new IdleState(player));
+            return;
+        }
+
+        // Priority 2: Drop into queued rest
+        if (player.sitQueued)
+        {
+            player.sitQueued = false;
+            player.ChangeState(new RestingState(player));
             return;
         }
 
@@ -307,14 +479,82 @@ public class JumpState : PlayerState
 
     public override void HandleInput()
     {
+        // Queue sit mid-jump
+        if (Input.GetKeyDown(KeyCode.X))
+        {
+            player.sitQueued = true;
+            Debug.Log("Sit Queued mid-jump! Will rest upon landing.");
+        }
+
         if (Input.GetMouseButtonDown(1))
         {
             if (player.GetMouseGroundPoint(out Vector3 clickPoint))
             {
-                attackQueued = true;
-                queuedAttackDir = (clickPoint - target).normalized;
-                Debug.Log("Attack Queued! Will fire upon landing.");
+                // Queue the attack if resources are green
+                if (player.CanAttack())
+                {
+                    attackQueued = true;
+                    queuedAttackDir = (clickPoint - target).normalized;
+                    Debug.Log("Attack Queued! Will fire upon landing.");
+                }
+                else
+                {
+                    Debug.LogWarning("Cannot queue attack: Out of stamina.");
+                }
             }
         }
+    }
+}
+
+// --- NEW STATE: RESTING STATE ---
+public class RestingState : PlayerState
+{
+    public RestingState(TacticalPlayer player) : base(player) { }
+
+    public override void Enter()
+    {
+        Debug.Log("Player sits down to rest. Regenerating stamina...");
+        player.SitDown(); // Smoothly squash the cylinder mesh
+    }
+
+    public override void Update()
+    {
+        // Regenerate stamina over time while resting
+        player.RegenerateStamina(player.restRegenRate * Time.deltaTime);
+    }
+
+    public override void HandleInput()
+    {
+        // 1. Right-Click to Attack: This interrupts the rest and forces them to stand up
+        if (Input.GetMouseButtonDown(1))
+        {
+            if (player.GetMouseGroundPoint(out Vector3 clickPoint))
+            {
+                if (player.CanAttack())
+                {
+                    player.TriggerAttackCooldown();
+                    player.TryConsumeStamina(player.attackStaminaCost);
+
+                    Vector3 direction = (clickPoint - player.transform.position).normalized;
+                    player.FireAttackRay(direction);
+
+                    Debug.Log("Rest interrupted by attack! Standing up.");
+                    player.ChangeState(new IdleState(player));
+                    return;
+                }
+            }
+        }
+
+        // 2. Manual Wake-up: Stand up if they press 'X' or left-click to move
+        if (Input.GetKeyDown(KeyCode.X) || Input.GetMouseButton(0))
+        {
+            Debug.Log("Player stands up from resting.");
+            player.ChangeState(new IdleState(player));
+        }
+    }
+
+    public override void Exit()
+    {
+        player.StandUp(); // Smoothly restore the original scale
     }
 }
