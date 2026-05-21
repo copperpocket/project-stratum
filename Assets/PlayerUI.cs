@@ -1,32 +1,45 @@
 using UnityEngine;
-using UnityEngine.UI; // This lets the script talk to Image components
+using UnityEngine.UI;
 
 public class PlayerUI : MonoBehaviour
 {
-    [Header("Target References")]
-    [SerializeField] private TacticalPlayer playerTarget;
-    
-    [Header("UI Component Elements")]
-    [SerializeField] private Image staminaFillImage;
+    [Header("References")]
+    [Tooltip("Drag your TacticalPlayer object here.")]
+    public TacticalPlayer player;
+
+    [Tooltip("Drag the Bar_Fill Image component here.")]
+    public RectTransform staminaFillRect;
+
+    [Header("Visual Tuning")]
+    [Tooltip("The color of the bar when stamina is high.")]
+    public Color fullColor = Color.green;
+    [Tooltip("The color of the bar when stamina is dangerously low.")]
+    public Color lowColor = Color.red;
+
+    private Image fillImage;
 
     void Start()
     {
-        // If you forget to drag the player into the slot, this will try to find it for you
-        if (playerTarget == null)
+        if (staminaFillRect != null)
         {
-            playerTarget = FindObjectOfType<TacticalPlayer>();
+            fillImage = staminaFillRect.GetComponent<Image>();
         }
     }
 
     void Update()
     {
-        if (playerTarget != null && staminaFillImage != null)
+        if (player == null || staminaFillRect == null) return;
+
+        // Calculate current stamina percentage safely using standard words for comparisons
+        float staminaPct = Mathf.Clamp01(player.currentStamina / player.maxStamina);
+
+        // Map percentage directly to the X local scale of our pivoted bar
+        staminaFillRect.localScale = new Vector3(staminaPct, 1f, 1f);
+
+        // Dynamic flair: Blend the color from green to red based on how empty it is
+        if (fillImage != null)
         {
-            // This turns stamina into a percentage decimal between 0.0 and 1.0
-            float staminaRatio = playerTarget.currentStamina / playerTarget.maxStamina;
-            
-            // This sets how full the bar is visually
-            staminaFillImage.fillAmount = staminaRatio;
+            fillImage.color = Color.Lerp(lowColor, fullColor, staminaPct);
         }
     }
 }

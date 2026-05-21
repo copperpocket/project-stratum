@@ -4,6 +4,10 @@ using UnityEngine;
 // --- 1. THE CONTEXT (Main MonoBehaviour) ---
 public class TacticalPlayer : MonoBehaviour
 {
+    [Header("Driver Configuration")]
+    [Tooltip("Check this ONLY on the NPC prefab so it ignores real mouse/keyboard inputs!")]
+    public bool isAIControlled = false;
+
     [Header("Run Settings")]
     public float runSpeed = 4f;
 
@@ -233,6 +237,8 @@ public class IdleState : PlayerState
 
     public override void HandleInput()
     {
+        if (player.isAIControlled) return;
+
         // Transition to Resting State manually
         if (Input.GetKeyDown(KeyCode.X))
         {
@@ -317,6 +323,8 @@ public class RunState : PlayerState
 
     public override void HandleInput()
     {
+        if (player.isAIControlled) return;
+
         // Queue the sit if they hit X while running
         if (Input.GetKeyDown(KeyCode.X))
         {
@@ -479,6 +487,8 @@ public class JumpState : PlayerState
 
     public override void HandleInput()
     {
+        if (player.isAIControlled) return;
+
         // Queue sit mid-jump
         if (Input.GetKeyDown(KeyCode.X))
         {
@@ -525,6 +535,8 @@ public class RestingState : PlayerState
 
     public override void HandleInput()
     {
+        if (player.isAIControlled) return;
+        
         // 1. Right-Click to Attack: This interrupts the rest and forces them to stand up
         if (Input.GetMouseButtonDown(1))
         {
